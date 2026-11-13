@@ -1196,10 +1196,27 @@ end:
 	return ISIS_OK;
 }
 
-static struct spf_adj_ref *adj_find(struct spf_adj_list_head *adj_list, const uint8_t *id,
-				    int level, uint16_t mtid, int family)
+/* The metric a circuit advertises in the root's own LSP. */
+static uint32_t circuit_metric(const struct isis_circuit *circuit, int level, bool oldmetric)
 {
-	struct spf_adj_ref *ref;
+	return oldmetric ? circuit->metric[level - 1] : circuit->te_metric[level - 1];
+}
+
+/*
+ * Find an adjacency for an IS reachability entry of the root's own LSP.
+ *
+ * With parallel links to the same neighbor, the LSP carries one entry per
+ * link, and the entry does not say which circuit it was built from.  Prefer
+ * the adjacency whose circuit has the entry's metric: taking the first one in
+ * the list would pair the entries with the adjacencies in the order the
+ * adjacencies came up, so a link that went down and came back would get the
+ * metric of another link.
+ */
+static struct spf_adj_ref *adj_find(struct spf_adj_list_head *adj_list, const uint8_t *id,
+				    int level, uint16_t mtid, int family, uint32_t metric,
+				    bool oldmetric)
+{
+	struct spf_adj_ref *ref, *first = NULL;
 
 	frr_each (spf_adj_list, adj_list, ref) {
 		struct isis_adjacency *adj = ref->adj;
@@ -1219,10 +1236,13 @@ static struct spf_adj_ref *adj_find(struct spf_adj_list_head *adj_list, const ui
 			continue;
 		if (family == AF_INET6 && !isis_adj_ipv6_usable(adj))
 			continue;
-		return ref;
+		if (adj->circuit && circuit_metric(adj->circuit, level, oldmetric) == metric)
+			return ref;
+		if (!first)
+			first = ref;
 	}
 
-	return NULL;
+	return first;
 }
 
 struct spf_preload_tent_ip_reach_args {
@@ -1463,7 +1483,8 @@ static void spf_adj_list_parse_tlv(struct isis_spftree *spftree, struct spf_adj_
 	if (!CHECK_FLAG(spftree->flags, F_SPFTREE_NO_ADJACENCIES) && !LSP_PSEUDO_ID(id)) {
 		struct spf_adj_ref *ref;
 
-		ref = adj_find(adj_list, id, spftree->level, spftree->mtid, spftree->family);
+		ref = adj_find(adj_list, id, spftree->level, spftree->mtid, spftree->family,
+			       sadj->metric, oldmetric);
 		if (!ref) {
 			XFREE(MTYPE_ISIS_SPF_ADJ, sadj);
 			return;
